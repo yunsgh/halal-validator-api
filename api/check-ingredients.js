@@ -20,7 +20,6 @@ function cleanIngredient(text) {
     cleaned = cleaned.replace(/\(.*?\)/g, "");
     
     // 3. Garde UNIQUEMENT les lettres (de tous les alphabets), les chiffres, les espaces et les tirets
-    // \p{L} = Lettre Unicode, \p{N} = Chiffre Unicode. Le flag 'u' est crucial.
     cleaned = cleaned.replace(/[^\p{L}\p{N}\s-]/gu, "");
     
     return cleaned.trim();
@@ -39,31 +38,35 @@ function buildDatabase(csvText) {
     for (let i = 1; i < lines.length; i++) {
         if (!lines[i]) continue;
         
-        // Google Sheets peut mettre des virgules dans les notes, mais pas nos 3 premières colonnes.
-        // C'est une astuce de parsing CSV "simple" qui marche pour notre cas.
+        // C'est un parser CSV très "naïf". Il s'attend à ce que les notes soient à la fin
+        // et ne gère pas les "quotes" parfaitement.
         const parts = lines[i].split(',');
         
         const key = parts[0];
         const status = parts[1];
         const searchTerms = parts[2];
-        const note_fr = parts[3]; // Note: ceci est une simplification
-        const note_en = parts[4]; // Si les notes ont des virgules, ce parsing casse.
+        const note_fr = parts[3]; // La vraie note
+        const note_en = parts[4]; 
         
         if (!key || !status || !searchTerms) continue;
 
         // 1. On remplit la DB principale (key -> info)
         mainDb[key] = {
             status: status,
-            note_fr: note_fr || "Pas de note",
-            note_en: note_en || "No note"
+            note_fr: note_fr ? note_fr.replace(/"/g, '') : "Pas de note", // Nettoie les "
+            note_en: note_en ? note_en.replace(/"/g, '') : "No note" // Nettoie les "
         };
         
         // 2. On remplit la DB de recherche (term -> key)
-        const terms = searchTerms.split(','); // Sépare "e120,carmine,carmin"
+        
+        // --- C'EST LA LIGNE QUI CHANGE ---
+        // Avant: const terms = searchTerms.split(',');
+        // V3.1:
+        const terms = searchTerms.split('|'); // On split par le pipe !
+        
         for (const term of terms) {
             const cleanTerm = term.trim();
             if (cleanTerm) {
-                // On normalise les termes de la DB au cas où (ex: "gélatine" devient "gelatine")
                 const normalizedTerm = cleanIngredient(cleanTerm);
                 searchMap[normalizedTerm] = key;
             }
@@ -79,12 +82,10 @@ function buildDatabase(csvText) {
 async function getDatabase() {
     const now = Date.now();
     
-    // 1. Vérifie le cache. Si valide, le renvoie.
     if (dbCache && (now - lastFetchTime < CACHE_DURATION_SECONDS * 1000)) {
         return dbCache;
     }
 
-    // 2. Si le cache est vide ou expiré, fetch
     try {
         const response = await fetch(SHEET_URL);
         if (!response.ok) {
@@ -93,7 +94,6 @@ async function getDatabase() {
         
         const csvText = await response.text();
         
-        // 3. Construit la DB et la met en cache
         dbCache = buildDatabase(csvText);
         lastFetchTime = now;
         
@@ -101,7 +101,6 @@ async function getDatabase() {
         
     } catch (error) {
         console.error("Erreur lors de la récupération ou du parsing du Google Sheet:", error);
-        // Si le fetch échoue, on renvoie l'ancien cache s'il existe (pour la résilience)
         if (dbCache) {
             return dbCache;
         }
@@ -109,7 +108,7 @@ async function getDatabase() {
     }
 }
 
-// --- Le Moteur (La Fonction Serverless) ---
+// --- Le Moteur (La Fonction Serverless - Inchangée) ---
 export default async function handler(req, res) {
     
     // CORS et validation de méthode
@@ -124,7 +123,6 @@ export default async function handler(req, res) {
     }
 
     try {
-        // 1. Récupérer la base de données (depuis le cache ou le fetch)
         const db = await getDatabase();
         
         const { ingredients } = req.body;
@@ -137,32 +135,28 @@ export default async function handler(req, res) {
         const status_priority = { "Haram": 3, "Mushbooh": 2, "Halal": 1, "Inconnu": 0 };
 
         for (const item_raw of ingredients) {
-            const item_clean = cleanIngredient(item_raw); // Utilise la nouvelle fonction v3
+            const item_clean = cleanIngredient(item_raw);
             
-            // Logique de recherche V3 :
-            // On cherche si le terme nettoyé existe dans notre 'searchMap'
             const dbKey = db.searchMap[item_clean];
             
             if (dbKey) {
-                // On a trouvé une correspondance (ex: "gelatine" -> "GELATIN_DEFAULT")
                 const info = db.mainDb[dbKey];
                 results.push({
                     input: item_raw,
                     match: dbKey,
                     status: info.status,
-                    note: info.note_fr // On renvoie la note en français (on pourrait ajouter un param 'lang' plus tard)
+                    note: info.note_fr
                 });
 
                 if (status_priority[info.status] > status_priority[overall_status]) {
                     overall_status = info.status;
                 }
             } else {
-                // Pas de correspondance
                 results.push({
                     input: item_raw,
                     match: "N/A",
                     status: "Inconnu",
-                    note: "Cet ingrédient n'est pas dans notre base de données."
+                    note: "Cet ingrédiant n'est pas dans notre base de données." // J'ai corrigé la faute ;)
                 });
             }
         }
