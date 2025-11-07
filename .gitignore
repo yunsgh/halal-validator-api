@@ -1,0 +1,9 @@
+# Fichiers de dépendances locales
+node_modules/
+
+# Cache et logs de Vercel
+.vercel/
+*.log
+
+# Fichiers système
+.DS_Store
